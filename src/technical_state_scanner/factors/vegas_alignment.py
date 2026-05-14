@@ -15,7 +15,7 @@ def _result(ts: str | None, triggered: bool, details: dict) -> dict:
     return {
         "triggered": triggered,
         "timestamp": ts,
-        "signal_name": "F1_VEGAS_ALIGNMENT",
+        "signal_name": "Vegas Alignment",
         "details": details,
     }
 
@@ -28,6 +28,7 @@ def detect_vegas_alignment(df: pd.DataFrame, **params) -> dict:
             False,
             {
                 "mode": None,
+                "mode_quality_tier": None,
                 "ema12_position": None,
                 "overall_spread_pct": None,
                 "slope_yellow": None,
@@ -60,14 +61,19 @@ def detect_vegas_alignment(df: pd.DataFrame, **params) -> dict:
     close_parallel_threshold = float(params.get("close_parallel_threshold_pct", 0.8))
 
     mode = None
+    mode_quality_tier = None
     if overlap and overall_spread_pct < 0.6:
-        mode = "D"
+        mode = "full_overlap"
+        mode_quality_tier = "A"
     elif overall_spread_pct < compression_threshold:
-        mode = "C"
+        mode = "tight_compression"
+        mode_quality_tier = "B"
     elif distance_pct <= close_parallel_threshold:
-        mode = "B"
+        mode = "parallel_close"
+        mode_quality_tier = "C"
     elif overlap:
-        mode = "A"
+        mode = "nested_interlaced"
+        mode_quality_tier = "A"
 
     ema12 = float(row["EMA12"])
     tunnel_low = min(yellow_low, green_low)
@@ -81,6 +87,7 @@ def detect_vegas_alignment(df: pd.DataFrame, **params) -> dict:
 
     details = {
         "mode": mode,
+        "mode_quality_tier": mode_quality_tier,
         "ema12_position": ema12_position,
         "overall_spread_pct": float(overall_spread_pct),
         "slope_yellow": _slope((df["EMA144"] + df["EMA169"]) / 2.0),

@@ -13,7 +13,7 @@ def _base_frame(n: int = 700) -> pd.DataFrame:
 def test_result_shape_and_keys():
     out = detect_vegas_alignment(_base_frame())
     assert set(["triggered", "timestamp", "signal_name", "details"]).issubset(set(out.keys()))
-    assert out["signal_name"] == "F1_VEGAS_ALIGNMENT"
+    assert out["signal_name"] == "Vegas Alignment"
 
 
 def test_positions_and_insufficient_history():

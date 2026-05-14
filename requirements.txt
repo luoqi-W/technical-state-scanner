@@ -3,3 +3,6 @@ numpy
 scipy
 pytest
 longport
+streamlit
+PySide6
+pyqtgraph

@@ -10,7 +10,7 @@ def _result(ts: str | None, triggered: bool, details: dict) -> dict:
     return {
         "triggered": triggered,
         "timestamp": ts,
-        "signal_name": "F2_EMA12_LIFTOFF",
+        "signal_name": "EMA12 Lift-Off",
         "details": details,
     }
 

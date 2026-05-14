@@ -10,11 +10,17 @@ readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
   "longport>=2.1.0",
-  "pandas>=2.0.0"
+  "numpy>=1.24.0",
+  "pandas>=2.0.0",
+  "PySide6>=6.6.0",
+  "pyqtgraph>=0.13.0",
+  "scipy>=1.10.0",
+  "streamlit>=1.30.0"
 ]
 
 [project.scripts]
 tech-state-validate-env = "technical_state_scanner.cli:main"
+tech-state-gui = "technical_state_scanner.gui.app:run_app"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

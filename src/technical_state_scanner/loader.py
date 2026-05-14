@@ -4,14 +4,16 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from decimal import Decimal
-import os
+import inspect
+import sys
 from typing import Any
+import warnings
 
 import pandas as pd
 
-from technical_state_scanner.config import REQUIRED_ENV_VARS
+from technical_state_scanner.config import ENV_VAR_GROUPS, get_longport_env_value, get_missing_longport_env_groups
 from technical_state_scanner.core.indicators import IndicatorStatus, add_vegas_tunnel_columns
 
 OHLCV_COLUMNS = ["Open", "High", "Low", "Close", "Volume"]
@@ -35,13 +37,16 @@ def normalize_symbol(symbol: str) -> str:
 
 
 def load_longport_credentials_from_env() -> LongPortCredentials:
-    missing = [name for name in REQUIRED_ENV_VARS if not os.getenv(name)]
+    missing = get_missing_longport_env_groups()
     if missing:
         raise RuntimeError("Missing required LongPort environment variables: " + ", ".join(missing))
+    app_key = get_longport_env_value(*ENV_VAR_GROUPS[0])
+    app_secret = get_longport_env_value(*ENV_VAR_GROUPS[1])
+    access_token = get_longport_env_value(*ENV_VAR_GROUPS[2])
     return LongPortCredentials(
-        app_key=os.environ["LONGPORT_APP_KEY"],
-        app_secret=os.environ["LONGPORT_APP_SECRET"],
-        access_token=os.environ["LONGPORT_ACCESS_TOKEN"],
+        app_key=app_key or "",
+        app_secret=app_secret or "",
+        access_token=access_token or "",
     )
 
 
@@ -70,13 +75,26 @@ def normalize_candles_to_ohlcv(candles: Sequence[Any]) -> pd.DataFrame:
     return frame[OHLCV_COLUMNS]
 
 
+def _get_window_start(timestamp: pd.Timestamp, freq: str) -> pd.Timestamp:
+    try:
+        return timestamp.floor(freq)
+    except ValueError:
+        naive_timestamp = timestamp.tz_localize(None)
+        period_start = naive_timestamp.to_period(freq).start_time
+        start = pd.Timestamp(period_start)
+        if start.tzinfo is None:
+            start = start.tz_localize(timestamp.tz)
+        return start
+
+
 def _drop_incomplete_last_bar(frame: pd.DataFrame, freq: str, now_utc: datetime | None = None) -> pd.DataFrame:
     if frame.empty:
         return frame
     now = now_utc or datetime.now(timezone.utc)
     last_ts = frame.index.max()
-    start = last_ts.floor(freq)
-    if now < (start + pd.Timedelta(freq)):
+    start = _get_window_start(last_ts, freq)
+    offset = pd.tseries.frequencies.to_offset(freq)
+    if now < (start + offset):
         return frame.iloc[:-1]
     return frame
 
@@ -88,10 +106,122 @@ def resample_ohlcv(frame: pd.DataFrame, freq: str, now_utc: datetime | None = No
     return _drop_incomplete_last_bar(resampled, freq=freq, now_utc=now_utc)
 
 
-def _load_candles_raw(ctx: Any, period_value: Any, symbol: str, start_at: datetime, end_at: datetime) -> pd.DataFrame:
+def _get_supported_trade_sessions() -> Any | None:
+    try:
+        from longport.openapi import TradeSessions
+    except Exception:  # pragma: no cover - depends on installed SDK version
+        return None
+    return getattr(TradeSessions, "All", None)
+
+
+def _get_callable_parameters(func: Any) -> dict[str, inspect.Parameter]:
+    try:
+        return dict(inspect.signature(func).parameters)
+    except (TypeError, ValueError):  # pragma: no cover - defensive for native SDK callables
+        return {}
+
+
+def _safe_signature_text(func: Any) -> str:
+    try:
+        return str(inspect.signature(func))
+    except (TypeError, ValueError):  # pragma: no cover - defensive for native SDK callables
+        return "unavailable"
+
+
+def _log_longport_loader_event(message: str) -> None:
+    print(f"[LongPort loader] {message}", file=sys.stderr)
+
+
+def _call_candlesticks_with_signature(
+    ctx: Any,
+    symbol: str,
+    period_value: Any,
+    count: int,
+    adjust_type: Any,
+    trade_sessions: Any | None,
+) -> tuple[Sequence[Any], str]:
+    params = _get_callable_parameters(ctx.candlesticks)
+    has_count = "count" in params
+    has_adjust_type = "adjust_type" in params
+    has_trade_sessions = "trade_sessions" in params or "trade_session" in params
+
+    if has_count:
+        kwargs: dict[str, Any] = {
+            "symbol": symbol,
+            "period": period_value,
+            "count": count,
+        }
+        if has_adjust_type:
+            kwargs["adjust_type"] = adjust_type
+        else:
+            warnings.warn(
+                "Installed LongPort SDK candlesticks() does not expose adjust_type; using closest compatible call.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+        if has_trade_sessions and trade_sessions is not None:
+            session_param = "trade_sessions" if "trade_sessions" in params else "trade_session"
+            kwargs[session_param] = trade_sessions
+        elif trade_sessions is not None:
+            warnings.warn(
+                "Installed LongPort SDK candlesticks() does not expose trade_sessions; using closest compatible call.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+
+        try:
+            return ctx.candlesticks(**kwargs), "keyword"
+        except TypeError:
+            if has_adjust_type and has_trade_sessions and trade_sessions is not None:
+                return ctx.candlesticks(symbol, period_value, count, adjust_type, trade_sessions), "positional_fallback_with_trade_sessions"
+            if has_adjust_type:
+                return ctx.candlesticks(symbol, period_value, count, adjust_type), "positional_fallback"
+            return ctx.candlesticks(symbol, period_value, count), "positional_fallback_without_adjust_type"
+
+    warnings.warn(
+        "Installed LongPort SDK candlesticks() signature does not expose count; attempting legacy compatible call.",
+        RuntimeWarning,
+        stacklevel=2,
+    )
+    if has_adjust_type:
+        return ctx.candlesticks(symbol=symbol, period=period_value, adjust_type=adjust_type), "legacy_keyword_without_count"
+    return ctx.candlesticks(symbol, period_value), "legacy_positional_without_count"
+
+
+def _load_candles_raw(ctx: Any, period_value: Any, symbol: str, count: int, timeframe: str | None = None) -> pd.DataFrame:
     from longport.openapi import AdjustType
-    candles = ctx.candlesticks(symbol, period_value, AdjustType.ForwardAdjust, start_at, end_at)
-    return normalize_candles_to_ohlcv(candles)
+
+    if not isinstance(count, int):
+        raise TypeError(f"LongPort candlestick count must be an integer, got {type(count).__name__}.")
+
+    trade_sessions = _get_supported_trade_sessions()
+    signature_text = _safe_signature_text(ctx.candlesticks)
+    _log_longport_loader_event(
+        "candlesticks signature="
+        f"{signature_text}; timeframe={timeframe or 'unknown'}; symbol={symbol}; "
+        f"count={count}; count_type={type(count).__name__}; count_is_int={isinstance(count, int)}; "
+        "adjust_type_target=adjust_type; adjust_type_in_count=False; "
+        f"trade_sessions_requested={trade_sessions is not None}"
+    )
+    candles, call_path = _call_candlesticks_with_signature(
+        ctx=ctx,
+        symbol=symbol,
+        period_value=period_value,
+        count=count,
+        adjust_type=AdjustType.ForwardAdjust,
+        trade_sessions=trade_sessions,
+    )
+    candle_count = len(candles) if hasattr(candles, "__len__") else "unknown"
+    _log_longport_loader_event(
+        f"candlesticks call_path={call_path}; timeframe={timeframe or 'unknown'}; "
+        f"returned_candles={candle_count}"
+    )
+    frame = normalize_candles_to_ohlcv(candles)
+    _log_longport_loader_event(
+        f"OHLCV timeframe={timeframe or 'unknown'}; rows={len(frame)}; "
+        f"non_empty={not frame.empty}; columns={list(frame.columns)}"
+    )
+    return frame
 
 
 def load_multi_timeframe_ohlcv(symbol: str, count: int = 300) -> tuple[dict[str, pd.DataFrame], dict[str, IndicatorStatus]]:
@@ -104,26 +234,23 @@ def load_multi_timeframe_ohlcv(symbol: str, count: int = 300) -> tuple[dict[str,
     normalized_symbol = normalize_symbol(symbol)
     ctx = QuoteContext(Config(creds.app_key, creds.app_secret, creds.access_token))
 
-    end_at = datetime.now(timezone.utc)
-    start_at = end_at - timedelta(days=1200)
-
     frames: dict[str, pd.DataFrame] = {}
 
-    daily = _load_candles_raw(ctx, getattr(Period, "Day"), normalized_symbol, start_at, end_at)
+    daily = _load_candles_raw(ctx, getattr(Period, "Day"), normalized_symbol, count=count, timeframe="daily")
     frames["daily"] = daily.tail(count)
 
     if hasattr(Period, "Week"):
-        weekly = _load_candles_raw(ctx, getattr(Period, "Week"), normalized_symbol, start_at, end_at)
+        weekly = _load_candles_raw(ctx, getattr(Period, "Week"), normalized_symbol, count=count, timeframe="weekly")
     else:
         weekly = resample_ohlcv(daily, "W-MON")
     frames["weekly"] = weekly.tail(count)
 
     if hasattr(Period, "Min_240"):
-        h4 = _load_candles_raw(ctx, getattr(Period, "Min_240"), normalized_symbol, start_at, end_at)
+        h4 = _load_candles_raw(ctx, getattr(Period, "Min_240"), normalized_symbol, count=count, timeframe="4hour")
     else:
         # fallback from lower timeframe data if Min_240 is unavailable
         if hasattr(Period, "Min_60"):
-            h1 = _load_candles_raw(ctx, getattr(Period, "Min_60"), normalized_symbol, start_at, end_at)
+            h1 = _load_candles_raw(ctx, getattr(Period, "Min_60"), normalized_symbol, count=count, timeframe="1hour")
             h4 = resample_ohlcv(h1, "4h")
         else:
             raise RuntimeError("LongPort SDK does not support Period.Min_240 or Period.Min_60 for fallback resampling.")
