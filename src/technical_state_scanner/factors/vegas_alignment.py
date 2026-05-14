@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pandas as pd
 
-REQUIRED_COLUMNS = ["EMA12", "EMA144", "EMA169", "EMA576", "EMA676"]
+REQUIRED_COLUMNS = ["EMA12", "EMA144", "EMA169", "EMA576", "EMA676", "Close"]
 
 
 def _slope(series: pd.Series, lookback: int = 5) -> float:
@@ -11,22 +11,35 @@ def _slope(series: pd.Series, lookback: int = 5) -> float:
     return float((series.iloc[-1] - series.iloc[-1 - lookback]) / lookback)
 
 
+def _result(ts: str | None, triggered: bool, details: dict) -> dict:
+    return {
+        "triggered": triggered,
+        "timestamp": ts,
+        "signal_name": "F1_VEGAS_ALIGNMENT",
+        "details": details,
+    }
+
+
 def detect_vegas_alignment(df: pd.DataFrame, **params) -> dict:
+    timestamp = df.index[-1].isoformat() if len(df) > 0 else None
     if len(df) < 676:
-        return {
-            "triggered": False,
-            "reason": "insufficient_history",
-            "mode": None,
-            "ema12_position": None,
-            "overall_spread_pct": None,
-            "slope_yellow": None,
-            "slope_green": None,
-            "distance_between_tunnels": None,
-        }
+        return _result(
+            timestamp,
+            False,
+            {
+                "mode": None,
+                "ema12_position": None,
+                "overall_spread_pct": None,
+                "slope_yellow": None,
+                "slope_green": None,
+                "distance_between_tunnels": None,
+                "reason": "insufficient_history",
+            },
+        )
 
     missing = [c for c in REQUIRED_COLUMNS if c not in df.columns]
     if missing:
-        return {"triggered": False, "reason": f"missing_columns: {', '.join(missing)}"}
+        return _result(timestamp, False, {"reason": f"missing_columns: {', '.join(missing)}"})
 
     row = df.iloc[-1]
     yellow_low = min(row["EMA144"], row["EMA169"])
@@ -66,18 +79,17 @@ def detect_vegas_alignment(df: pd.DataFrame, **params) -> dict:
     else:
         ema12_position = "BELOW_TUNNEL"
 
-    slope_yellow = _slope(((df["EMA144"] + df["EMA169"]) / 2.0))
-    slope_green = _slope(((df["EMA576"] + df["EMA676"]) / 2.0))
-
-    triggered = mode is not None
-    reason = None if triggered else "no_vegas_alignment"
-    return {
-        "triggered": triggered,
+    details = {
         "mode": mode,
         "ema12_position": ema12_position,
         "overall_spread_pct": float(overall_spread_pct),
-        "slope_yellow": float(slope_yellow),
-        "slope_green": float(slope_green),
+        "slope_yellow": _slope((df["EMA144"] + df["EMA169"]) / 2.0),
+        "slope_green": _slope((df["EMA576"] + df["EMA676"]) / 2.0),
         "distance_between_tunnels": float(distance_between_tunnels),
-        "reason": reason,
     }
+
+    triggered = mode is not None
+    if not triggered:
+        details["reason"] = "no_vegas_alignment"
+
+    return _result(timestamp, triggered, details)
