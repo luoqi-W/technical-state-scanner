@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "technical-state-scanner"
+version = "0.1.0"
+description = "LongPort multi-signal multi-timeframe technical state scanner"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "longport>=2.1.0",
+  "pandas>=2.0.0"
+]
+
+[project.scripts]
+tech-state-validate-env = "technical_state_scanner.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
