@@ -1,2 +1,32 @@
 # technical-state-scanner
-LongPort multi-signal multi-timeframe technical state scanner
+
+LongPort multi-signal multi-timeframe technical state scanner.
+
+## Working checkpoints
+
+### Checkpoint 1
+- Basic Python project structure
+- LongPort environment validation
+- CLI command: `tech-state-validate-env`
+
+### Checkpoint 2
+- LongPort candlestick data loader using `longport.openapi.Config` and `QuoteContext`
+- Symbol normalization (`AAPL` -> `AAPL.US`)
+- OHLCV normalization into pandas DataFrame with `DatetimeIndex` and columns: `Open`, `High`, `Low`, `Close`, `Volume`
+- Runnable example in `main.py` that fetches `AAPL.US` and prints `head()`
+
+## Required LongPort environment variables
+
+- `LONGPORT_APP_KEY`
+- `LONGPORT_APP_SECRET`
+- `LONGPORT_ACCESS_TOKEN`
+
+## Quick start
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install -e .
+tech-state-validate-env
+python main.py
+```
