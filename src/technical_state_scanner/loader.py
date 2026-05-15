@@ -14,10 +14,17 @@ import warnings
 import pandas as pd
 
 from technical_state_scanner.config import ENV_VAR_GROUPS, get_longport_env_value, get_missing_longport_env_groups
+from technical_state_scanner.cache.cache_manager import (
+    load_cached,
+    merge_new_bars,
+    save_cache,
+    is_cache_fresh,
+)
 from technical_state_scanner.core.indicators import IndicatorStatus, add_vegas_tunnel_columns
 
 OHLCV_COLUMNS = ["Open", "High", "Low", "Close", "Volume"]
 TIMEFRAME_TO_PERIOD_NAME = {"daily": "Day", "weekly": "Week", "4hour": "Min_240"}
+SMART_INCREMENTAL_FETCH_COUNT = 30
 
 
 @dataclass(frozen=True)
@@ -261,4 +268,113 @@ def load_multi_timeframe_ohlcv(symbol: str, count: int = 300) -> tuple[dict[str,
         if frames[timeframe].empty:
             raise RuntimeError(f"LongPort returned empty candlestick data for timeframe: {timeframe}.")
         frames[timeframe], statuses[timeframe] = add_vegas_tunnel_columns(frames[timeframe])
+    return frames, statuses
+
+
+def _create_longport_quote_context() -> Any:
+    try:
+        from longport.openapi import Config, QuoteContext
+    except Exception as exc:  # pragma: no cover
+        raise RuntimeError("LongPort SDK is not installed or importable. Install dependency `longport`.") from exc
+
+    creds = load_longport_credentials_from_env()
+    return QuoteContext(Config(creds.app_key, creds.app_secret, creds.access_token))
+
+
+def _fetch_timeframe_ohlcv(ctx: Any, symbol: str, timeframe: str, count: int) -> pd.DataFrame:
+    from longport.openapi import Period
+
+    if timeframe == "daily":
+        return _load_candles_raw(ctx, getattr(Period, "Day"), symbol, count=count, timeframe="daily")
+    if timeframe == "weekly":
+        if hasattr(Period, "Week"):
+            return _load_candles_raw(ctx, getattr(Period, "Week"), symbol, count=count, timeframe="weekly")
+        daily_count = max(count * 7, count)
+        daily = _load_candles_raw(ctx, getattr(Period, "Day"), symbol, count=daily_count, timeframe="daily")
+        return resample_ohlcv(daily, "W-MON")
+    if timeframe == "4hour":
+        if hasattr(Period, "Min_240"):
+            return _load_candles_raw(ctx, getattr(Period, "Min_240"), symbol, count=count, timeframe="4hour")
+        if hasattr(Period, "Min_60"):
+            h1 = _load_candles_raw(ctx, getattr(Period, "Min_60"), symbol, count=max(count * 4, count), timeframe="1hour")
+            return resample_ohlcv(h1, "4h")
+        raise RuntimeError("LongPort SDK does not support Period.Min_240 or Period.Min_60 for fallback resampling.")
+    raise ValueError(f"Unsupported timeframe: {timeframe}")
+
+
+def _load_ohlcv_smart_raw(
+    symbol: str,
+    timeframe: str,
+    count: int = 700,
+    force_refresh: bool = False,
+) -> pd.DataFrame:
+    normalized_symbol = normalize_symbol(symbol)
+    cached = None if force_refresh else load_cached(normalized_symbol, timeframe)
+
+    if force_refresh or cached is None:
+        ctx = _create_longport_quote_context()
+        fetched = _fetch_timeframe_ohlcv(ctx, normalized_symbol, timeframe, count)
+        save_cache(fetched, normalized_symbol, timeframe)
+        return fetched.tail(count)
+
+    if is_cache_fresh(normalized_symbol, timeframe):
+        return cached.tail(count)
+
+    try:
+        ctx = _create_longport_quote_context()
+        # LongPort candlesticks does not expose a stable fetch-since timestamp API in
+        # the supported SDK versions. Fetch a small recent window, then merge by
+        # timestamp so overlapping bars are updated and genuinely new bars are added.
+        recent = _fetch_timeframe_ohlcv(ctx, normalized_symbol, timeframe, SMART_INCREMENTAL_FETCH_COUNT)
+        merged = merge_new_bars(cached, recent)
+        save_cache(merged, normalized_symbol, timeframe)
+        return merged.tail(count)
+    except Exception as exc:
+        _log_longport_loader_event(
+            f"incremental refresh failed; using stale cache; "
+            f"timeframe={timeframe}; symbol={normalized_symbol}; error={exc}"
+        )
+        return cached.tail(count)
+
+
+def load_ohlcv_smart(
+    symbol: str,
+    timeframe: str,
+    count: int = 700,
+    force_refresh: bool = False,
+) -> pd.DataFrame:
+    """Cache-first loader with incremental updates."""
+
+    frame = _load_ohlcv_smart_raw(
+        symbol=symbol,
+        timeframe=timeframe,
+        count=count,
+        force_refresh=force_refresh,
+    )
+    if frame.empty:
+        raise RuntimeError(f"LongPort returned empty candlestick data for timeframe: {timeframe}.")
+    frame, _status = add_vegas_tunnel_columns(frame)
+    return frame.tail(count)
+
+
+def load_multi_timeframe_ohlcv_smart(
+    symbol: str,
+    count: int = 700,
+    force_refresh: bool = False,
+) -> tuple[dict[str, pd.DataFrame], dict[str, IndicatorStatus]]:
+    """Load weekly, daily, and 4-hour OHLCV through the local parquet cache."""
+
+    normalized_symbol = normalize_symbol(symbol)
+    frames: dict[str, pd.DataFrame] = {}
+    statuses: dict[str, IndicatorStatus] = {}
+    for timeframe in ["weekly", "daily", "4hour"]:
+        raw = _load_ohlcv_smart_raw(
+            symbol=normalized_symbol,
+            timeframe=timeframe,
+            count=count,
+            force_refresh=force_refresh,
+        )
+        if raw.empty:
+            raise RuntimeError(f"LongPort returned empty candlestick data for timeframe: {timeframe}.")
+        frames[timeframe], statuses[timeframe] = add_vegas_tunnel_columns(raw.tail(count))
     return frames, statuses

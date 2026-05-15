@@ -154,6 +154,12 @@ class TestLightweightUniverseResult:
 
         assert load_symbols_from_file(path) == ["AAPL.US", "CRCL.US"]
 
+    def test_load_symbols_from_comma_separated_txt_file(self, tmp_path):
+        path = tmp_path / "watchlist.txt"
+        path.write_text("AAPL, MSFT,crcl.us\n# comment\nTSLA\n", encoding="utf-8")
+
+        assert load_symbols_from_file(path) == ["AAPL.US", "MSFT.US", "CRCL.US", "TSLA.US"]
+
     def test_load_symbols_from_csv_file_with_symbol_column(self, tmp_path):
         path = tmp_path / "watchlist.csv"
         path.write_text("ticker,name\nTSLA,Tesla\nMSFT,Microsoft\n", encoding="utf-8")

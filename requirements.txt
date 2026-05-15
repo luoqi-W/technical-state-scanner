@@ -1,8 +1,10 @@
 pandas
+pyarrow
 numpy
 scipy
 pytest
 longport
+finplot
 streamlit
-PySide6
+PyQt6
 pyqtgraph

@@ -14,6 +14,7 @@ TIMEFRAME_LABEL_TO_KEY = {
 }
 EMA_COLUMNS = ["EMA12", "EMA144", "EMA169", "EMA576", "EMA676"]
 VEGAS_COLUMNS = ["VegasLower", "VegasUpper"]
+CHART_WINDOWS_DAYS = [5, 10, 15, 20, 30, 100, 200]
 
 
 def get_timeframe_key(label: str) -> str:
@@ -39,15 +40,8 @@ def format_badges(values: list[str] | None) -> list[str]:
 def build_signal_pairs(timeframe_result: dict[str, Any]) -> list[str]:
     """Return readable factor + signal labels for the selected timeframe."""
 
-    factors = timeframe_result.get("triggered_factors", [])
     signals = timeframe_result.get("triggered_signals", [])
-    if not factors:
-        return []
-    labels: list[str] = []
-    for index, factor in enumerate(factors):
-        signal = signals[index] if index < len(signals) else factor
-        labels.append(f"{factor} {signal}")
-    return labels
+    return signals or []
 
 
 def build_factor_combination_summary(timeframe_label: str, timeframe_result: dict[str, Any]) -> str:
@@ -227,6 +221,89 @@ def prepare_price_panel_data(frame: pd.DataFrame | None, max_rows: int = 350) ->
     return frame[columns].tail(max_rows).copy()
 
 
+def slice_recent_chart_window(frame: pd.DataFrame | None, days: int, min_rows: int | None = None) -> pd.DataFrame:
+    """Return recent rows while keeping sparse timeframes readable."""
+
+    if frame is None or frame.empty:
+        return pd.DataFrame()
+    sorted_frame = frame.sort_index()
+    if not isinstance(sorted_frame.index, pd.DatetimeIndex):
+        row_count = max(days, min_rows or 0)
+        return sorted_frame.tail(row_count).copy()
+    latest = sorted_frame.index.max()
+    start = latest - pd.Timedelta(days=days)
+    window = sorted_frame.loc[sorted_frame.index >= start].copy()
+    if min_rows is not None and len(window) < min_rows:
+        return sorted_frame.tail(min_rows).copy()
+    return window if not window.empty else sorted_frame.tail(1).copy()
+
+
+def minimum_visible_rows_for_timeframe(timeframe_key: str) -> int:
+    """Return enough bars for each timeframe to fill the chart area usefully."""
+
+    if timeframe_key == "weekly":
+        return 52
+    if timeframe_key == "daily":
+        return 120
+    if timeframe_key == "4hour":
+        return 120
+    return 60
+
+
+def candle_width_for_timeframe(timeframe_key: str) -> float:
+    """Return readable candle body width for finplot's x-indexed candles."""
+
+    if timeframe_key == "weekly":
+        return 0.92
+    if timeframe_key == "daily":
+        return 0.72
+    if timeframe_key == "4hour":
+        return 0.58
+    return 0.65
+
+
+def x_bounds_for_timeframe(timeframe_key: str, chart_data: pd.DataFrame) -> tuple[Any, Any]:
+    """Return x-axis bounds for the visible chart window."""
+
+    if chart_data.empty:
+        return 0, 0
+    if timeframe_key in {"4hour", "daily", "weekly"}:
+        return 0, len(chart_data) - 1
+    return chart_data.index[0], chart_data.index[-1]
+
+
+def prepare_finplot_ohlc_data(
+    frame: pd.DataFrame | None,
+    days: int,
+    timeframe_key: str | None = None,
+) -> pd.DataFrame:
+    """Return OHLC plus available overlay columns for finplot rendering."""
+
+    min_rows = minimum_visible_rows_for_timeframe(timeframe_key) if timeframe_key else None
+    chart_frame = slice_recent_chart_window(frame, days, min_rows=min_rows)
+    if chart_frame.empty:
+        return pd.DataFrame()
+    required = ["Open", "High", "Low", "Close"]
+    if any(column not in chart_frame.columns for column in required):
+        return pd.DataFrame()
+    columns = required.copy()
+    columns.extend(column for column in EMA_COLUMNS + VEGAS_COLUMNS if column in chart_frame.columns)
+    return chart_frame[columns].dropna(subset=required).copy()
+
+
+def prepare_ema_overlay_data(chart_data: pd.DataFrame) -> dict[str, pd.Series]:
+    """Return clean EMA series for explicit finplot overlay rendering."""
+
+    overlays: dict[str, pd.Series] = {}
+    for column in EMA_COLUMNS:
+        if column not in chart_data.columns:
+            continue
+        series = pd.to_numeric(chart_data[column], errors="coerce").dropna()
+        if not series.empty:
+            overlays[column] = series
+    return overlays
+
+
 def prepare_volume_panel_data(frame: pd.DataFrame | None, max_rows: int = 350) -> pd.DataFrame:
     """Return volume data for the selected timeframe."""
 
@@ -238,6 +315,5 @@ def prepare_volume_panel_data(frame: pd.DataFrame | None, max_rows: int = 350) -
 def get_triggered_factor_labels(timeframe_result: dict[str, Any]) -> list[str]:
     """Return labels for triggered factors in the selected timeframe."""
 
-    factors = timeframe_result.get("triggered_factors", [])
     signals = timeframe_result.get("triggered_signals", [])
-    return [f"{factor}: {signal}" for factor, signal in zip(factors, signals)]
+    return signals or []

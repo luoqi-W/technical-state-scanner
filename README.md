@@ -176,7 +176,7 @@ Universe browsing stays lightweight. It shows ticker, total score, triggered sig
 
 ## Desktop GUI
 
-The desktop viewer is a separate PySide6 / pyqtgraph app for a faster dark-theme dashboard experience. It keeps the Streamlit app available, but it does not use Streamlit as the main interactive surface.
+The desktop viewer is a separate PyQt6 / finplot app for a faster dark-theme dashboard experience. It keeps the Streamlit app available, but it does not use Streamlit as the main interactive surface.
 
 Run it after installing dependencies:
 
