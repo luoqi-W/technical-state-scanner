@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, asdict
+import json
 from pathlib import Path
 import sys
 import time
@@ -277,12 +278,42 @@ def scan_universe_lightweight(
     )
 
 
+def _normalize_unique_symbols(raw_symbols: list[str], source_path: Path) -> list[str]:
+    normalized: list[str] = []
+    for symbol in raw_symbols:
+        normalized_symbol = normalize_symbol(symbol)
+        if normalized_symbol not in normalized:
+            normalized.append(normalized_symbol)
+    if not normalized:
+        raise ValueError(f"Symbol list contains no usable tickers: {source_path}")
+    return normalized
+
+
+def _load_symbols_from_json(path: Path, symbol_column: str | None = None) -> list[str]:
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if isinstance(data, list):
+        raw_symbols = [str(value).strip() for value in data if str(value).strip()]
+    elif isinstance(data, dict):
+        key = symbol_column or "symbols"
+        if key not in data:
+            raise ValueError(f"JSON symbol key `{key}` not found in {path}")
+        values = data[key]
+        if not isinstance(values, list):
+            raise ValueError(f"JSON symbol key `{key}` must contain a list in {path}")
+        raw_symbols = [str(value).strip() for value in values if str(value).strip()]
+    else:
+        raise ValueError(f"Symbol list JSON must be an array or object: {path}")
+    return _normalize_unique_symbols(raw_symbols, path)
+
+
 def load_universe_from_file(path: str | Path) -> list[str]:
-    """Read normalized tickers from a TXT universe file."""
+    """Read normalized tickers from a universe file."""
 
     universe_path = Path(path)
     if not universe_path.exists():
         raise FileNotFoundError(f"Universe file not found: {universe_path}")
+    if universe_path.suffix.lower() == ".json":
+        return _load_symbols_from_json(universe_path)
     symbols: list[str] = []
     for line in universe_path.read_text(encoding="utf-8").splitlines():
         text = line.strip()
@@ -347,12 +378,13 @@ def scan_universe_concurrent(
 
 
 def load_symbols_from_file(path: str | Path, symbol_column: str | None = None) -> list[str]:
-    """Load symbols from a CSV or TXT watchlist and normalize them for LongPort.
+    """Load symbols from a CSV, TXT, LIST, or JSON watchlist and normalize them for LongPort.
 
     TXT/LIST files may contain one symbol per line or comma-separated symbols.
     Blank lines and lines starting with ``#`` are ignored. CSV files use
     ``symbol_column`` when provided; otherwise the first column is treated as the
-    ticker column.
+    ticker column. JSON files may be a symbol array or an object containing a
+    ``symbols`` list, with ``symbol_column`` selecting a different object key.
     """
 
     watchlist_path = Path(path)
@@ -368,6 +400,8 @@ def load_symbols_from_file(path: str | Path, symbol_column: str | None = None) -
         if column not in df.columns:
             raise ValueError(f"Symbol column `{column}` not found in {watchlist_path}")
         raw_symbols = [str(value).strip() for value in df[column].dropna().tolist()]
+    elif suffix == ".json":
+        return _load_symbols_from_json(watchlist_path, symbol_column=symbol_column)
     elif suffix in {".txt", ".list"}:
         raw_symbols = []
         for line in watchlist_path.read_text(encoding="utf-8").splitlines():
@@ -375,16 +409,9 @@ def load_symbols_from_file(path: str | Path, symbol_column: str | None = None) -
             if text and not text.startswith("#"):
                 raw_symbols.extend(symbol.strip() for symbol in text.split(",") if symbol.strip())
     else:
-        raise ValueError("Symbol list must be a .csv, .txt, or .list file.")
+        raise ValueError("Symbol list must be a .csv, .txt, .list, or .json file.")
 
-    normalized: list[str] = []
-    for symbol in raw_symbols:
-        normalized_symbol = normalize_symbol(symbol)
-        if normalized_symbol not in normalized:
-            normalized.append(normalized_symbol)
-    if not normalized:
-        raise ValueError(f"Symbol list contains no usable tickers: {watchlist_path}")
-    return normalized
+    return _normalize_unique_symbols(raw_symbols, watchlist_path)
 
 
 def load_named_universe(name: str, base_path: str | Path = ".") -> list[str]:
@@ -406,8 +433,10 @@ def load_named_universe(name: str, base_path: str | Path = ".") -> list[str]:
 
     root = Path(base_path)
     candidates = [
+        root / "universes" / f"{key}.json",
         root / "universes" / f"{key}.csv",
         root / "universes" / f"{key}.txt",
+        root / "data" / "universes" / f"{key}.json",
         root / "data" / "universes" / f"{key}.csv",
         root / "data" / "universes" / f"{key}.txt",
     ]

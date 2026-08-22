@@ -10,19 +10,20 @@ readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
   "longport>=2.1.0",
-  "finplot>=1.9.7",
   "numpy>=1.24.0",
   "pandas>=2.0.0",
+  "pytz>=2024.1",
   "pyarrow>=14.0.0",
-  "PyQt6>=6.6.0",
-  "pyqtgraph>=0.13.0",
   "scipy>=1.10.0",
-  "streamlit>=1.30.0"
+  "duckdb>=0.10.0",
+  "fastapi>=0.109.0",
+  "uvicorn[standard]>=0.27.0",
+  "websockets>=12.0",
 ]
 
 [project.scripts]
 tech-state-validate-env = "technical_state_scanner.cli:main"
-tech-state-gui = "technical_state_scanner.gui.app:run_app"
+tech-state-server = "technical_state_scanner.api.app:run_server"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

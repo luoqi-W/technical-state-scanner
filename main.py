@@ -30,7 +30,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="LongPort multi-signal multi-timeframe technical state scanner."
     )
-    parser.add_argument("--universe", default="watchlist", help="Universe name or TXT file path for default scan.")
+    parser.add_argument("--universe", default="watchlist", help="Universe name or CSV/TXT/JSON file path for default scan.")
     parser.add_argument("--force-refresh", action="store_true", help="Bypass local parquet cache.")
     parser.add_argument("--workers", type=int, default=3, help="Concurrent workers for universe scans.")
     parser.add_argument("--count", type=int, default=700, help="Candlestick count per timeframe.")
@@ -41,7 +41,7 @@ def build_parser() -> argparse.ArgumentParser:
     scan_parser = subparsers.add_parser("scan", help="Run a pure scanner job without chart rendering.")
     scan_target = scan_parser.add_mutually_exclusive_group(required=True)
     scan_target.add_argument("--ticker", help="Single ticker to scan, such as AAPL or AAPL.US.")
-    scan_target.add_argument("--universe-file", help="CSV/TXT watchlist file containing symbols.")
+    scan_target.add_argument("--universe-file", help="CSV/TXT/JSON watchlist file containing symbols.")
     scan_target.add_argument(
         "--universe",
         choices=["watchlist", "sp100", "sp500", "s&p500", "nasdaq", "nasdaq100"],
@@ -58,6 +58,52 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Pure scan mode. Accepted for clarity; CLI scans never render charts.",
     )
+
+    # Scheduler subcommand
+    sched_parser = subparsers.add_parser("scheduler", help="Run the data scheduler.")
+    sched_parser.add_argument(
+        "--phase",
+        choices=["pre_market", "intraday", "post_market", "weekly", "auto"],
+        default="auto",
+        help="Scheduler phase to run. 'auto' detects from current time.",
+    )
+    sched_parser.add_argument("--universe", default="watchlist", dest="sched_universe",
+                              help="Universe for scheduler symbols.")
+    sched_parser.add_argument("--loop", action="store_true",
+                              help="Run scheduler in a continuous loop.")
+
+    # API server subcommand
+    server_parser = subparsers.add_parser("server", help="Start the FastAPI backend server.")
+    server_parser.add_argument("--host", default="0.0.0.0", help="Bind address.")
+    server_parser.add_argument("--port", type=int, default=8000, help="Port number.")
+
+    history_parser = subparsers.add_parser("history", help="Download historical K-line data to local DuckDB/cache.")
+    history_parser.add_argument("--universe", default="watchlist", help="Universe name or CSV/TXT/JSON file path.")
+    history_parser.add_argument(
+        "--timeframes",
+        nargs="+",
+        choices=["weekly", "daily", "4hour", "15min"],
+        default=["weekly", "daily", "4hour"],
+        help="Timeframes to download.",
+    )
+    history_parser.add_argument(
+        "--max-pages",
+        type=int,
+        default=None,
+        help="Maximum 1000-bar pages per symbol/timeframe. Omit for full backfill.",
+    )
+    history_parser.add_argument("--loop", action="store_true", help="Run incremental updates forever.")
+    history_parser.add_argument("--interval-hours", type=float, default=24.0, help="Loop interval in hours.")
+    history_parser.add_argument(
+        "--interval-minutes",
+        type=float,
+        help="Loop interval in minutes. Overrides --interval-hours when provided.",
+    )
+    history_parser.add_argument(
+        "--import-parquet-root",
+        help="Import existing StockSelection-style parquet root, such as D:\\GitHub\\StockSelection\\data\\parquet.",
+    )
+
     return parser
 
 
@@ -124,9 +170,10 @@ def resolve_default_universe_symbols(universe: str) -> list[str]:
     candidate = Path(universe)
     if candidate.exists():
         return load_universe_from_file(candidate)
-    named_path = Path("universes") / f"{universe}.txt"
-    if named_path.exists():
-        return load_universe_from_file(named_path)
+    for suffix in (".json", ".csv", ".txt", ".list"):
+        named_path = Path("universes") / f"{universe}{suffix}"
+        if named_path.exists():
+            return load_universe_from_file(named_path)
     return load_named_universe(universe)
 
 
@@ -253,6 +300,145 @@ def run_scan(args: argparse.Namespace) -> int:
     return _run_universe_scan(args)
 
 
+def run_scheduler(args: argparse.Namespace) -> int:
+    from technical_state_scanner.scheduler.scheduler import (
+        SchedulePhase,
+        SchedulerConfig,
+        SchedulerLoop,
+        run_auto,
+        run_phase,
+    )
+
+    try:
+        symbols = resolve_default_universe_symbols(args.sched_universe)
+    except Exception as exc:
+        print(f"Failed to load universe: {exc}")
+        return 1
+
+    config = SchedulerConfig(symbols=symbols)
+
+    if args.loop:
+        print(f"Starting scheduler loop for {len(symbols)} symbols...")
+        loop = SchedulerLoop(config)
+        try:
+            loop.run_forever()
+        except KeyboardInterrupt:
+            loop.stop()
+            print("\nScheduler stopped.")
+        return 0
+
+    if args.phase == "auto":
+        result = run_auto(config)
+        if result is None:
+            print("No scheduled phase for the current time window.")
+            return 0
+    else:
+        phase = SchedulePhase(args.phase)
+        result = run_phase(phase, config)
+
+    print(f"Phase: {result.phase.value}")
+    print(f"Symbols processed: {result.symbols_processed}")
+    print(f"Rows written: {result.rows_written}")
+    print(f"Failed: {result.symbols_failed}")
+    if result.errors:
+        for err in result.errors:
+            print(f"  ERROR: {err}")
+    return 1 if result.symbols_failed > 0 else 0
+
+
+def run_server(args: argparse.Namespace) -> int:
+    from technical_state_scanner.api.app import run_server as _run_server
+    print(f"Starting API server on {args.host}:{args.port}...")
+    _run_server(host=args.host, port=args.port)
+    return 0
+
+
+def run_history_download(args: argparse.Namespace) -> int:
+    from technical_state_scanner.history_downloader import (
+        download_history_for_symbols,
+        import_stockselection_parquet,
+        run_history_update_loop,
+    )
+
+    try:
+        symbols = resolve_default_universe_symbols(args.universe)
+    except Exception as exc:
+        print(f"Failed to load universe: {exc}")
+        return 1
+
+    if args.import_parquet_root:
+        print(
+            f"Importing local parquet from {args.import_parquet_root}; "
+            f"symbols={len(symbols)}; timeframes={','.join(args.timeframes)}"
+        )
+        result = import_stockselection_parquet(
+            source_root=args.import_parquet_root,
+            symbols=symbols,
+            timeframes=args.timeframes,
+        )
+        print(f"Symbols imported: {result.symbols_processed}")
+        print(f"Rows written: {result.rows_written}")
+        print(f"Errors: {len(result.errors)}")
+        if result.errors:
+            for error in result.errors[:20]:
+                print(f"  ERROR: {error}")
+        return 1 if result.errors else 0
+
+    if args.loop:
+        loop_pages = args.max_pages if args.max_pages is not None else 1
+        interval_seconds = (
+            args.interval_minutes * 60
+            if args.interval_minutes is not None
+            else args.interval_hours * 3600
+        )
+        interval_text = (
+            f"{args.interval_minutes:g} minutes"
+            if args.interval_minutes is not None
+            else f"{args.interval_hours:g} hours"
+        )
+        print(
+            f"Starting history update loop for {len(symbols)} symbols; "
+            f"timeframes={','.join(args.timeframes)}; interval={interval_text}; "
+            f"max_pages={loop_pages}"
+        )
+        try:
+            run_history_update_loop(
+                symbols=symbols,
+                timeframes=args.timeframes,
+                interval_seconds=interval_seconds,
+                max_pages=loop_pages,
+            )
+        except KeyboardInterrupt:
+            print("\nHistory update loop stopped.")
+        return 0
+
+    def _progress(item: object) -> None:
+        symbol = getattr(item, "symbol")
+        timeframe = getattr(item, "timeframe")
+        rows = getattr(item, "rows_written")
+        pages = getattr(item, "pages_fetched")
+        error = getattr(item, "error")
+        suffix = f" ERROR: {error}" if error else ""
+        print(f"{symbol}/{timeframe}: rows={rows}, pages={pages}{suffix}")
+
+    print(
+        f"Downloading history for {len(symbols)} symbols; "
+        f"timeframes={','.join(args.timeframes)}; max_pages={args.max_pages or 'full'}"
+    )
+    result = download_history_for_symbols(
+        symbols=symbols,
+        timeframes=args.timeframes,
+        max_pages=args.max_pages,
+        on_progress=_progress,
+    )
+    print(f"Rows written: {result.rows_written}")
+    print(f"Errors: {len(result.errors)}")
+    if result.errors:
+        for error in result.errors[:20]:
+            print(f"  ERROR: {error}")
+    return 1 if result.errors else 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -261,6 +447,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _print_env_validation()
     if args.command == "scan":
         return run_scan(args)
+    if args.command == "scheduler":
+        return run_scheduler(args)
+    if args.command == "server":
+        return run_server(args)
+    if args.command == "history":
+        return run_history_download(args)
 
     return run_default_universe_scan(args)
 

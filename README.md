@@ -100,7 +100,7 @@ python main.py scan --ticker AAPL --json-output reports/result.json
 
 Universe scans use lightweight results only: ticker, scores, triggered signals, triggered factors, factor confluence summary, timestamps, data source, and failure reason if any. Universe CSV output does not include chart data, chart images, or full factor diagnostic payloads.
 
-Scan symbols from a custom CSV or TXT watchlist:
+Scan symbols from a custom CSV, TXT, or JSON watchlist:
 
 ```bash
 python main.py scan --universe-file data/universes/my_watchlist.csv
@@ -112,7 +112,7 @@ For CSV files, the first column is used by default. You can specify a column:
 python main.py scan --universe-file data/universes/my_watchlist.csv --symbol-column ticker
 ```
 
-TXT files should contain one ticker per line. Blank lines and lines beginning with `#` are ignored.
+TXT files should contain one ticker per line. Blank lines and lines beginning with `#` are ignored. JSON files may be a symbol array, such as `["AAPL", "MSFT"]`, or an object containing a `symbols` array.
 
 Named local universe lists are supported when the files exist under `universes/` or `data/universes/`:
 
@@ -126,12 +126,16 @@ python main.py scan --universe nasdaq
 
 Recognized local files include:
 
+- `universes/sp500.json`
 - `universes/sp500.csv`
 - `universes/sp500.txt`
+- `universes/nasdaq.json`
 - `universes/nasdaq.csv`
 - `universes/nasdaq.txt`
+- `data/universes/sp500.json`
 - `data/universes/sp500.csv`
 - `data/universes/sp500.txt`
+- `data/universes/nasdaq.json`
 - `data/universes/nasdaq.csv`
 - `data/universes/nasdaq.txt`
 
@@ -145,7 +149,7 @@ If `--output` is omitted for a universe scan, a timestamped CSV is written under
 
 ## Pure Scan Mode
 
-The CLI is a pure scan mode. It does not require Streamlit and does not render charts.
+The CLI is a pure scan mode. It does not render charts.
 
 You can make that explicit:
 
@@ -153,51 +157,75 @@ You can make that explicit:
 python main.py scan --ticker AAPL --no-charts
 ```
 
-Charts are generated lazily only in the Streamlit UI result viewer: a chart is rendered only after the user selects a specific ticker and timeframe. Universe scans do not pre-render charts.
+Charts are available in the React web UI.
 
-## Streamlit UI
+## React Web UI
 
-Run the result viewer:
+The production-style local website is served by FastAPI. On Windows, double-click:
 
-```bash
-streamlit run src/technical_state_scanner/ui/app.py
+```text
+start_website.bat
 ```
 
-The UI includes:
+Then open:
 
-- a ticker search bar and Scan button for single-stock scans
-- a persistent score summary that stays visible when switching timeframes
-- a [4H] [Daily] [Weekly] selector
-- a selected-timeframe candlestick chart with EMA12, EMA144, EMA169, EMA576, EMA676, and Vegas Tunnel lines when available
-- selected-timeframe triggered factors, triggered signals, factor confluence, and diagnostics
-- lightweight ranked universe result browsing
-
-Universe browsing stays lightweight. It shows ticker, total score, triggered signals, triggered factors, factor confluence, timestamps, and failure reason when applicable. Charts are rendered lazily only after a ticker and timeframe are selected.
-
-## Desktop GUI
-
-The desktop viewer is a separate PyQt6 / finplot app for a faster dark-theme dashboard experience. It keeps the Streamlit app available, but it does not use Streamlit as the main interactive surface.
-
-Run it after installing dependencies:
-
-```bash
-python -m technical_state_scanner.gui.app
+```text
+http://127.0.0.1:8000
 ```
 
-If the package is installed with `pip install -e .`, this command is also available:
+The batch file builds the React frontend when needed, starts the FastAPI backend, and opens the browser.
+
+You can also start it manually:
 
 ```bash
-tech-state-gui
+python main.py server --host 127.0.0.1 --port 8000
 ```
 
-The desktop GUI includes:
+The backend starts StockSelection-style automatic K-line updates in the background:
 
-- compact top toolbar with ticker input, 4H / Daily / Weekly selector, candles count, Scan button, and LongPort data-source label
-- left persistent score summary with ticker, latest date, latest close, total score, pre-multiplier score, coverage multiplier, all triggered signals, selected timeframe factors, confluence, and failure reason
-- stacked chart area with price/EMA/Vegas lines, volume bars, and selected timeframe signal labels
-- lazy rendering for only the selected ticker and selected timeframe
+- pre-market, 4:00-9:30 AM ET: supplement `daily` + `weekly`
+- intraday, 4:00 AM-8:00 PM ET: rolling update `15min` + `4hour` every 5 minutes
+For frontend development, you can still run Vite in a second terminal:
 
-The desktop GUI consumes existing scanner/scoring outputs and LongPort OHLCV frames. It does not reimplement F1-F6, scoring, or data loading rules.
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+## Historical K-Line Download
+
+Backfill local K-line data from LongPort historical candlesticks into `data_store/scanner.duckdb` and `data_cache/`:
+
+```bash
+python main.py history --universe watchlist
+```
+
+By default this downloads `weekly`, `daily`, and `4hour` data. You can choose specific timeframes:
+
+```bash
+python main.py history --universe watchlist --timeframes daily weekly
+```
+
+Manual daily incremental updates are still available:
+
+```bash
+python main.py history --universe watchlist --loop
+```
+
+Manual 15-minute updates every 5 minutes are also available, but they are no longer required when the backend is running:
+
+```bash
+python main.py history --universe watchlist --timeframes 15min --loop --interval-minutes 5
+```
+
+For Windows Task Scheduler, create a daily task that runs this one-shot incremental command:
+
+```bash
+python main.py history --universe watchlist --max-pages 1
+```
+
+LongPort historical candlesticks return at most 1000 bars per request and are limited to 60 requests per 30 seconds, so the downloader throttles requests automatically.
 
 ## Outputs
 
@@ -228,9 +256,3 @@ Universe CSV output is lightweight and includes:
 - data source
 - timestamps
 - failure reason if applicable
-
-## Tests
-
-```bash
-python -m pytest -q
-```

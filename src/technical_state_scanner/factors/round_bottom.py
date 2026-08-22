@@ -77,7 +77,7 @@ def detect_round_bottom(df: pd.DataFrame, **params) -> dict:
     # 1. a > 0 (concave up, U-shaped)
     # 2. R² > threshold
     # 3. Vertex is in middle 60% of window
-    triggered = (a > 0) and (r_squared > min_r_squared) and vertex_in_range
+    triggered = (a > 0) and (r_squared >= min_r_squared) and vertex_in_range
     
     details = {
         "a": float(a),
@@ -92,7 +92,7 @@ def detect_round_bottom(df: pd.DataFrame, **params) -> dict:
         reasons = []
         if a <= 0:
             reasons.append("a_not_positive")
-        if r_squared <= min_r_squared:
+        if r_squared < min_r_squared:
             reasons.append("r_squared_too_low")
         if not vertex_in_range:
             reasons.append("vertex_outside_range")
