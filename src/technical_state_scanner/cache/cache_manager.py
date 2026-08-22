@@ -11,6 +11,7 @@ CACHE_FRESHNESS_HOURS = {
     "daily": 12,
     "4hour": 2,
     "weekly": 72,
+    "15min": 0.5,
 }
 OHLCV_COLUMNS = ["Open", "High", "Low", "Close", "Volume"]
 

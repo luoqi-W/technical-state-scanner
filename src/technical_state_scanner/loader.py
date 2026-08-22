@@ -23,7 +23,7 @@ from technical_state_scanner.cache.cache_manager import (
 from technical_state_scanner.core.indicators import IndicatorStatus, add_vegas_tunnel_columns
 
 OHLCV_COLUMNS = ["Open", "High", "Low", "Close", "Volume"]
-TIMEFRAME_TO_PERIOD_NAME = {"daily": "Day", "weekly": "Week", "4hour": "Min_240"}
+TIMEFRAME_TO_PERIOD_NAME = {"daily": "Day", "weekly": "Week", "4hour": "Min_240", "15min": "Min_15"}
 SMART_INCREMENTAL_FETCH_COUNT = 30
 
 
@@ -57,6 +57,15 @@ def load_longport_credentials_from_env() -> LongPortCredentials:
     )
 
 
+def _create_longport_config(config_class: Any, creds: LongPortCredentials) -> Any:
+    """Create a LongPort config across legacy and current SDK versions."""
+
+    from_apikey = getattr(config_class, "from_apikey", None)
+    if callable(from_apikey):
+        return from_apikey(creds.app_key, creds.app_secret, creds.access_token)
+    return config_class(creds.app_key, creds.app_secret, creds.access_token)
+
+
 def _to_float(value: Any) -> float:
     return float(value if not isinstance(value, Decimal) else float(value))
 
@@ -69,8 +78,12 @@ def normalize_candles_to_ohlcv(candles: Sequence[Any]) -> pd.DataFrame:
         timestamp = getattr(candle, "timestamp", None)
         if timestamp is None:
             raise RuntimeError("LongPort candle is missing required `timestamp` field.")
+        if isinstance(timestamp, (int, float)):
+            parsed_timestamp = pd.to_datetime(timestamp, unit="s", utc=True)
+        else:
+            parsed_timestamp = pd.to_datetime(timestamp, utc=True)
         rows.append({
-            "Datetime": pd.to_datetime(timestamp, utc=True),
+            "Datetime": parsed_timestamp,
             "Open": _to_float(getattr(candle, "open")),
             "High": _to_float(getattr(candle, "high")),
             "Low": _to_float(getattr(candle, "low")),
@@ -239,7 +252,7 @@ def load_multi_timeframe_ohlcv(symbol: str, count: int = 300) -> tuple[dict[str,
 
     creds = load_longport_credentials_from_env()
     normalized_symbol = normalize_symbol(symbol)
-    ctx = QuoteContext(Config(creds.app_key, creds.app_secret, creds.access_token))
+    ctx = QuoteContext(_create_longport_config(Config, creds))
 
     frames: dict[str, pd.DataFrame] = {}
 
@@ -278,7 +291,7 @@ def _create_longport_quote_context() -> Any:
         raise RuntimeError("LongPort SDK is not installed or importable. Install dependency `longport`.") from exc
 
     creds = load_longport_credentials_from_env()
-    return QuoteContext(Config(creds.app_key, creds.app_secret, creds.access_token))
+    return QuoteContext(_create_longport_config(Config, creds))
 
 
 def _fetch_timeframe_ohlcv(ctx: Any, symbol: str, timeframe: str, count: int) -> pd.DataFrame:
@@ -299,6 +312,10 @@ def _fetch_timeframe_ohlcv(ctx: Any, symbol: str, timeframe: str, count: int) ->
             h1 = _load_candles_raw(ctx, getattr(Period, "Min_60"), symbol, count=max(count * 4, count), timeframe="1hour")
             return resample_ohlcv(h1, "4h")
         raise RuntimeError("LongPort SDK does not support Period.Min_240 or Period.Min_60 for fallback resampling.")
+    if timeframe == "15min":
+        if hasattr(Period, "Min_15"):
+            return _load_candles_raw(ctx, getattr(Period, "Min_15"), symbol, count=count, timeframe="15min")
+        raise RuntimeError("LongPort SDK does not support Period.Min_15.")
     raise ValueError(f"Unsupported timeframe: {timeframe}")
 
 

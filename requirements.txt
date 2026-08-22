@@ -4,7 +4,3 @@ numpy
 scipy
 pytest
 longport
-finplot
-streamlit
-PyQt6
-pyqtgraph

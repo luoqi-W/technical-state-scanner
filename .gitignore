@@ -1,4 +1,12 @@
 __pycache__/
 *.pyc
+*.egg-info/
+.pytest_cache/
+.vscode/
+*.log
 data_cache/
+data_store/
+datasets/
 reports/
+frontend/node_modules/
+frontend/dist/
